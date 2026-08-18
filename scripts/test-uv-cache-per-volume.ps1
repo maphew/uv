@@ -368,6 +368,13 @@ try {
 
     $psDriveName = "UV" + [guid]::NewGuid().ToString("N").Substring(0, 6)
     $psDriveRoot = $PSScriptRoot
+    # The script may sit on a different volume than the working directory, so
+    # derive the expectation from the drive's underlying path instead of the
+    # working directory's selection.
+    $psDriveExpectedCache = Get-UvCacheDirectoryForPath `
+        -Path $psDriveRoot `
+        -DefaultCacheDirectory $defaultCache `
+        -CacheRelativePath $cacheRelativePath
     New-PSDrive -Name $psDriveName -PSProvider FileSystem -Root $psDriveRoot -Scope Global | Out-Null
     Set-Location ($psDriveName + ":\")
     $psDriveLocation = Get-Location
@@ -377,7 +384,7 @@ try {
         -Actual $script:UvCachePerVolumeState.LastLocationKey `
         -Case "PSDrive provider path location key"
     Assert-Equal `
-        -Expected $expectedCache `
+        -Expected $psDriveExpectedCache `
         -Actual $psDriveSelection.CacheDirectory `
         -Case "PSDrive cache selection"
     Set-Location $testState.Location

@@ -551,7 +551,9 @@ Dot-source it from an interactive prompt or your PowerShell profile, not from a 
                 Set-UvCacheForCurrentVolume
             }
             catch {
-                Write-Warning "Unable to update uv directories for the current prompt: $_"
+                # A persistent failure would repeat on every prompt render; keep it
+                # out of the console unless verbose output is requested.
+                Write-Verbose "Unable to update uv directories for the current prompt: $_"
             }
         }
 
