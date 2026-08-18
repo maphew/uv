@@ -24,11 +24,11 @@ For example, if uv's default cache is `C:\Users\me\AppData\Local\uv\cache`:
 
 ## Installation
 
-Dot-source the script near the end of the PowerShell profile, after prompt tools such as Oh My Posh
-or Starship are initialized:
+Copy script to somewhere convenient and dot-source the script near the end of the PowerShell profile, 
+after prompt tools such as Oh My Posh or Starship are initialized. I like `~/.local/bin`.
 
 ```powershell
-. "C:\path\to\uv\scripts\uv-cache-per-volume.ps1"
+. "$env:USERPROFILE\.local\bin\uv-cache-per-volume.ps1"
 Enable-UvCachePerVolume
 ```
 
