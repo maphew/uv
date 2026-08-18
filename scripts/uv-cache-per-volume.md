@@ -44,7 +44,23 @@ To override the fallback cache explicitly:
 
 ```powershell
 Enable-UvCachePerVolume `
-    -DefaultCacheDirectory "C:\Users\me\AppData\Local\uv\cache"
+    -DefaultCacheDirectory "D:\Caches\uv"
+```
+
+With this configuration, `D:` uses `D:\Caches\uv`, other fixed local volumes use their
+volume-local `.uv\cache`, and mapped drives or UNC shares fall back to `D:\Caches\uv`.
+
+For a persistent profile configuration with a per-user path on secondary volumes:
+
+```powershell
+. "C:\path\to\uv\scripts\uv-cache-per-volume.ps1"
+
+$uvCacheOptions = @{
+    DefaultCacheDirectory = "D:\Caches\uv"
+    CacheRelativePath     = ".uv\cache\$env:USERNAME"
+}
+
+Enable-UvCachePerVolume @uvCacheOptions
 ```
 
 Inspect the current selection with:
