@@ -28,6 +28,8 @@ namespace UvCachePerVolume
 "@
 }
 
+$script:UvCachePerVolumeScopeMarker = [object]::new()
+
 if (-not (Get-Variable -Name UvCachePerVolumeState -Scope Script -ErrorAction SilentlyContinue)) {
     $script:UvCachePerVolumeState = $null
 }
@@ -40,9 +42,23 @@ function Resolve-UvCacheVolume {
     )
 
     $fullPath = [System.IO.Path]::GetFullPath($Path)
-    $pathRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    $isExtendedLocalPath = $false
+    if ($fullPath.StartsWith("\\?\UNC\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $fullPath = "\\" + $fullPath.Substring(8)
+    }
+    elseif ($fullPath.StartsWith("\\?\", [System.StringComparison]::OrdinalIgnoreCase)) {
+        $isExtendedLocalPath = $true
+        $strippedPath = $fullPath.Substring(4)
+        if ([System.IO.Path]::IsPathRooted($strippedPath)) {
+            $fullPath = $strippedPath
+        }
+    }
 
-    if ($pathRoot.StartsWith("\\")) {
+    $pathRoot = [System.IO.Path]::GetPathRoot($fullPath)
+    if ([string]::IsNullOrWhiteSpace($pathRoot)) {
+        return $null
+    }
+    if (-not $isExtendedLocalPath -and $pathRoot.StartsWith("\\")) {
         return [pscustomobject]@{
             Root      = $pathRoot
             DriveType = [System.IO.DriveType]::Network
@@ -141,7 +157,25 @@ function Get-UvCacheDirectoryForPath {
         -VolumeResolver $VolumeResolver
 }
 
-function Get-UvBuiltInCacheDirectory {
+function ConvertTo-UvAbsoluteDirectory {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Directory
+    )
+
+    if ([System.IO.Path]::IsPathRooted($Directory)) {
+        return [System.IO.Path]::GetFullPath($Directory)
+    }
+
+    $location = Get-Location
+    if ($location.Provider.Name -ne "FileSystem") {
+        throw "uv returned a relative directory outside a filesystem location: $Directory"
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $location.ProviderPath $Directory))
+}
+
+function Get-UvDefaultCacheDirectory {
     [CmdletBinding()]
     param()
 
@@ -151,11 +185,11 @@ function Get-UvBuiltInCacheDirectory {
 
     try {
         Remove-Item Env:UV_CACHE_DIR -ErrorAction SilentlyContinue
-        $cacheDirectory = & $uvCommand.Source cache dir --no-config
+        $cacheDirectory = & $uvCommand.Source cache dir
         if ($LASTEXITCODE -ne 0) {
-            throw "uv cache dir --no-config exited with code $LASTEXITCODE."
+            throw "uv cache dir exited with code $LASTEXITCODE."
         }
-        return [System.IO.Path]::GetFullPath(($cacheDirectory | Select-Object -Last 1))
+        return ConvertTo-UvAbsoluteDirectory -Directory ($cacheDirectory | Select-Object -Last 1)
     }
     finally {
         if ($cacheDirectoryWasSet) {
@@ -167,7 +201,7 @@ function Get-UvBuiltInCacheDirectory {
     }
 }
 
-function Get-UvBuiltInToolDirectories {
+function Get-UvDefaultToolDirectories {
     [CmdletBinding()]
     param()
 
@@ -181,19 +215,19 @@ function Get-UvBuiltInToolDirectories {
         Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue
         Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue
 
-        $toolDirectory = & $uvCommand.Source tool dir --no-config
+        $toolDirectory = & $uvCommand.Source tool dir
         if ($LASTEXITCODE -ne 0) {
-            throw "uv tool dir --no-config exited with code $LASTEXITCODE."
+            throw "uv tool dir exited with code $LASTEXITCODE."
         }
 
-        $toolBinDirectory = & $uvCommand.Source tool dir --bin --no-config
+        $toolBinDirectory = & $uvCommand.Source tool dir --bin
         if ($LASTEXITCODE -ne 0) {
-            throw "uv tool dir --bin --no-config exited with code $LASTEXITCODE."
+            throw "uv tool dir --bin exited with code $LASTEXITCODE."
         }
 
         return [pscustomobject]@{
-            ToolDirectory    = [System.IO.Path]::GetFullPath(($toolDirectory | Select-Object -Last 1))
-            ToolBinDirectory = [System.IO.Path]::GetFullPath(($toolBinDirectory | Select-Object -Last 1))
+            ToolDirectory    = ConvertTo-UvAbsoluteDirectory -Directory ($toolDirectory | Select-Object -Last 1)
+            ToolBinDirectory = ConvertTo-UvAbsoluteDirectory -Directory ($toolBinDirectory | Select-Object -Last 1)
         }
     }
     finally {
@@ -221,6 +255,10 @@ function Set-UvManagedToolBinPath {
     )
 
     $state = $script:UvCachePerVolumeState
+    if ($null -eq $state -or -not $state.Enabled) {
+        throw "Enable-UvCachePerVolume must be called first."
+    }
+
     $pathSeparator = [System.IO.Path]::PathSeparator
     $pathEntries = @($env:PATH -split [regex]::Escape([string]$pathSeparator))
 
@@ -261,28 +299,103 @@ function Set-UvCacheForCurrentVolume {
         [switch]$PassThru
     )
 
-    if ($null -eq $script:UvCachePerVolumeState -or -not $script:UvCachePerVolumeState.Enabled) {
+    $state = $script:UvCachePerVolumeState
+    if ($null -eq $state -or -not $state.Enabled) {
         throw "Enable-UvCachePerVolume must be called first."
     }
 
     $location = $null
+    $locationPath = $null
+    $locationKey = $null
     $isFileSystemLocation = $false
     try {
         $location = Get-Location
         $isFileSystemLocation = $location.Provider.Name -eq "FileSystem"
         if ($isFileSystemLocation) {
-            $selectedCacheDirectory = Get-UvCacheDirectoryForPath `
-                -Path $location.Path `
-                -DefaultCacheDirectory $script:UvCachePerVolumeState.DefaultCacheDirectory `
-                -CacheRelativePath $script:UvCachePerVolumeState.CacheRelativePath
+            $locationPath = $location.ProviderPath
         }
-        else {
-            $selectedCacheDirectory = $script:UvCachePerVolumeState.DefaultCacheDirectory
-        }
+        $locationKey = "{0}|{1}" -f $location.Provider.Name, $(
+            if ($isFileSystemLocation) {
+                $locationPath
+            }
+            else {
+                $location.Path
+            }
+        )
     }
     catch {
-        Write-Verbose "Unable to select a cache for the current volume: $_"
-        $selectedCacheDirectory = $script:UvCachePerVolumeState.DefaultCacheDirectory
+        Write-Verbose "Unable to inspect the current location: $_"
+    }
+
+    $selectionIsCached = $null -ne $locationKey -and
+        [System.StringComparer]::OrdinalIgnoreCase.Equals($state.LastLocationKey, $locationKey)
+
+    if ($selectionIsCached) {
+        $selectedCacheDirectory = $state.SelectedCacheDirectory
+        $selectedToolDirectory = $state.SelectedToolDirectory
+        $selectedToolBinDirectory = $state.SelectedToolBinDirectory
+    }
+    else {
+        $resolvedVolumes = @{}
+        $volumeResolver = {
+            param($CandidatePath)
+
+            $candidateKey = [System.IO.Path]::GetFullPath($CandidatePath)
+            if (-not $resolvedVolumes.ContainsKey($candidateKey)) {
+                $resolvedVolumes[$candidateKey] = Resolve-UvCacheVolume -Path $candidateKey
+            }
+            return $resolvedVolumes[$candidateKey]
+        }.GetNewClosure()
+
+        try {
+            if ($isFileSystemLocation) {
+                $selectedCacheDirectory = Get-UvCacheDirectoryForPath `
+                    -Path $locationPath `
+                    -DefaultCacheDirectory $state.DefaultCacheDirectory `
+                    -CacheRelativePath $state.CacheRelativePath `
+                    -VolumeResolver $volumeResolver
+            }
+            else {
+                $selectedCacheDirectory = $state.DefaultCacheDirectory
+            }
+        }
+        catch {
+            Write-Verbose "Unable to select a cache for the current volume: $_"
+            $selectedCacheDirectory = $state.DefaultCacheDirectory
+        }
+
+        $selectedToolDirectory = $null
+        $selectedToolBinDirectory = $null
+        if ($state.ManageTools) {
+            try {
+                if ($isFileSystemLocation) {
+                    $selectedToolDirectory = Get-UvDirectoryForPath `
+                        -Path $locationPath `
+                        -DefaultDirectory $state.DefaultToolDirectory `
+                        -RelativePath $state.ToolDirectoryRelativePath `
+                        -VolumeResolver $volumeResolver
+                    $selectedToolBinDirectory = Get-UvDirectoryForPath `
+                        -Path $locationPath `
+                        -DefaultDirectory $state.DefaultToolBinDirectory `
+                        -RelativePath $state.ToolBinDirectoryRelativePath `
+                        -VolumeResolver $volumeResolver
+                }
+                else {
+                    $selectedToolDirectory = $state.DefaultToolDirectory
+                    $selectedToolBinDirectory = $state.DefaultToolBinDirectory
+                }
+            }
+            catch {
+                Write-Verbose "Unable to select tool directories for the current volume: $_"
+                $selectedToolDirectory = $state.DefaultToolDirectory
+                $selectedToolBinDirectory = $state.DefaultToolBinDirectory
+            }
+        }
+
+        $state.LastLocationKey = $locationKey
+        $state.SelectedCacheDirectory = $selectedCacheDirectory
+        $state.SelectedToolDirectory = $selectedToolDirectory
+        $state.SelectedToolBinDirectory = $selectedToolBinDirectory
     }
 
     if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
@@ -292,34 +405,25 @@ function Set-UvCacheForCurrentVolume {
         $env:UV_CACHE_DIR = $selectedCacheDirectory
     }
 
-    $selectedToolDirectory = $null
-    $selectedToolBinDirectory = $null
-    if ($script:UvCachePerVolumeState.ManageTools) {
-        try {
-            if ($isFileSystemLocation) {
-                $selectedToolDirectory = Get-UvDirectoryForPath `
-                    -Path $location.Path `
-                    -DefaultDirectory $script:UvCachePerVolumeState.DefaultToolDirectory `
-                    -RelativePath $script:UvCachePerVolumeState.ToolDirectoryRelativePath
-                $selectedToolBinDirectory = Get-UvDirectoryForPath `
-                    -Path $location.Path `
-                    -DefaultDirectory $script:UvCachePerVolumeState.DefaultToolBinDirectory `
-                    -RelativePath $script:UvCachePerVolumeState.ToolBinDirectoryRelativePath
-            }
-            else {
-                $selectedToolDirectory = $script:UvCachePerVolumeState.DefaultToolDirectory
-                $selectedToolBinDirectory = $script:UvCachePerVolumeState.DefaultToolBinDirectory
-            }
+    if ($state.ManageTools) {
+        if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                $env:UV_TOOL_DIR,
+                $selectedToolDirectory
+            )) {
+            $env:UV_TOOL_DIR = $selectedToolDirectory
         }
-        catch {
-            Write-Verbose "Unable to select tool directories for the current volume: $_"
-            $selectedToolDirectory = $script:UvCachePerVolumeState.DefaultToolDirectory
-            $selectedToolBinDirectory = $script:UvCachePerVolumeState.DefaultToolBinDirectory
+        if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                $env:UV_TOOL_BIN_DIR,
+                $selectedToolBinDirectory
+            )) {
+            $env:UV_TOOL_BIN_DIR = $selectedToolBinDirectory
         }
-
-        $env:UV_TOOL_DIR = $selectedToolDirectory
-        $env:UV_TOOL_BIN_DIR = $selectedToolBinDirectory
-        Set-UvManagedToolBinPath -ToolBinDirectory $selectedToolBinDirectory
+        if (-not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+                $state.ActiveToolBinDirectory,
+                $selectedToolBinDirectory
+            )) {
+            Set-UvManagedToolBinPath -ToolBinDirectory $selectedToolBinDirectory
+        }
     }
 
     if ($PassThru) {
@@ -347,6 +451,18 @@ function Enable-UvCachePerVolume {
         throw "The per-volume uv cache hook is already enabled."
     }
 
+    $globalScopeMarker = Get-Variable `
+        -Name UvCachePerVolumeScopeMarker `
+        -Scope Global `
+        -ErrorAction SilentlyContinue
+    if ($null -eq $globalScopeMarker -or
+        -not [object]::ReferenceEquals($script:UvCachePerVolumeScopeMarker, $globalScopeMarker.Value)) {
+        throw @"
+uv-cache-per-volume.ps1 must be dot-sourced directly from the global scope.
+Dot-source it from an interactive prompt or your PowerShell profile, not from a nested installer script.
+"@
+    }
+
     if ([string]::IsNullOrWhiteSpace($CacheRelativePath) -or
         [System.IO.Path]::IsPathRooted($CacheRelativePath)) {
         throw "CacheRelativePath must be a non-empty path relative to a volume root."
@@ -370,7 +486,7 @@ function Enable-UvCachePerVolume {
     }
 
     if ([string]::IsNullOrWhiteSpace($DefaultCacheDirectory)) {
-        $DefaultCacheDirectory = Get-UvBuiltInCacheDirectory
+        $DefaultCacheDirectory = Get-UvDefaultCacheDirectory
     }
     else {
         $DefaultCacheDirectory = [System.IO.Path]::GetFullPath($DefaultCacheDirectory)
@@ -379,16 +495,16 @@ function Enable-UvCachePerVolume {
     if ($ManageTools) {
         if ([string]::IsNullOrWhiteSpace($DefaultToolDirectory) -or
             [string]::IsNullOrWhiteSpace($DefaultToolBinDirectory)) {
-            $builtInToolDirectories = Get-UvBuiltInToolDirectories
+            $defaultToolDirectories = Get-UvDefaultToolDirectories
         }
         if ([string]::IsNullOrWhiteSpace($DefaultToolDirectory)) {
-            $DefaultToolDirectory = $builtInToolDirectories.ToolDirectory
+            $DefaultToolDirectory = $defaultToolDirectories.ToolDirectory
         }
         else {
             $DefaultToolDirectory = [System.IO.Path]::GetFullPath($DefaultToolDirectory)
         }
         if ([string]::IsNullOrWhiteSpace($DefaultToolBinDirectory)) {
-            $DefaultToolBinDirectory = $builtInToolDirectories.ToolBinDirectory
+            $DefaultToolBinDirectory = $defaultToolDirectories.ToolBinDirectory
         }
         else {
             $DefaultToolBinDirectory = [System.IO.Path]::GetFullPath($DefaultToolBinDirectory)
@@ -403,17 +519,12 @@ function Enable-UvCachePerVolume {
     $originalToolBinDirectory = [Environment]::GetEnvironmentVariable("UV_TOOL_BIN_DIR", "Process")
     $originalToolBinDirectoryWasSet = Test-Path Env:UV_TOOL_BIN_DIR
 
-    $promptWrapper = {
-        Set-UvCacheForCurrentVolume
-        & $originalPrompt
-    }.GetNewClosure()
-
-    $script:UvCachePerVolumeState = [pscustomobject]@{
+    $hookState = [pscustomobject]@{
         Enabled                         = $true
         DefaultCacheDirectory           = $DefaultCacheDirectory
         CacheRelativePath               = $CacheRelativePath
         OriginalPrompt                  = $originalPrompt
-        PromptWrapper                   = $promptWrapper
+        PromptWrapper                   = $null
         OriginalCacheDirectory          = $originalCacheDirectory
         OriginalCacheDirectoryWasSet    = $originalCacheDirectoryWasSet
         ManageTools                     = [bool]$ManageTools
@@ -427,7 +538,31 @@ function Enable-UvCachePerVolume {
         OriginalToolBinDirectoryWasSet  = $originalToolBinDirectoryWasSet
         ActiveToolBinDirectory          = $null
         ActiveToolBinWasInserted        = $false
+        LastLocationKey                 = $null
+        SelectedCacheDirectory          = $null
+        SelectedToolDirectory           = $null
+        SelectedToolBinDirectory        = $null
     }
+
+    $promptWrapper = {
+        $lastCommandSucceeded = $?
+        if ($hookState.Enabled) {
+            try {
+                Set-UvCacheForCurrentVolume
+            }
+            catch {
+                Write-Warning "Unable to update uv directories for the current prompt: $_"
+            }
+        }
+
+        if (-not $lastCommandSucceeded) {
+            Write-Error "Preserving the previous command status for the prompt." -ErrorAction Ignore
+        }
+        & $originalPrompt
+    }.GetNewClosure()
+
+    $hookState.PromptWrapper = $promptWrapper
+    $script:UvCachePerVolumeState = $hookState
 
     Set-Item Function:\global:prompt $promptWrapper
     Set-UvCacheForCurrentVolume
@@ -437,28 +572,31 @@ function Disable-UvCachePerVolume {
     [CmdletBinding()]
     param()
 
-    if ($null -eq $script:UvCachePerVolumeState -or -not $script:UvCachePerVolumeState.Enabled) {
+    $state = $script:UvCachePerVolumeState
+    if ($null -eq $state -or -not $state.Enabled) {
         return
     }
 
+    $state.Enabled = $false
+
     $currentPrompt = (Get-Item Function:\prompt).ScriptBlock
-    if ($currentPrompt.ToString() -eq $script:UvCachePerVolumeState.PromptWrapper.ToString()) {
-        Set-Item Function:\global:prompt $script:UvCachePerVolumeState.OriginalPrompt
+    if ($currentPrompt.ToString() -eq $state.PromptWrapper.ToString()) {
+        Set-Item Function:\global:prompt $state.OriginalPrompt
     }
     else {
         Write-Warning "The prompt changed after the uv cache hook was enabled; it was not replaced."
     }
 
-    if ($script:UvCachePerVolumeState.OriginalCacheDirectoryWasSet) {
-        $env:UV_CACHE_DIR = $script:UvCachePerVolumeState.OriginalCacheDirectory
+    if ($state.OriginalCacheDirectoryWasSet) {
+        $env:UV_CACHE_DIR = $state.OriginalCacheDirectory
     }
     else {
         Remove-Item Env:UV_CACHE_DIR -ErrorAction SilentlyContinue
     }
 
-    if ($script:UvCachePerVolumeState.ManageTools) {
-        if ($script:UvCachePerVolumeState.ActiveToolBinWasInserted) {
-            $activeToolBinDirectory = $script:UvCachePerVolumeState.ActiveToolBinDirectory.TrimEnd('\', '/')
+    if ($state.ManageTools) {
+        if ($state.ActiveToolBinWasInserted) {
+            $activeToolBinDirectory = $state.ActiveToolBinDirectory.TrimEnd('\', '/')
             $pathSeparator = [System.IO.Path]::PathSeparator
             $pathEntries = @($env:PATH -split [regex]::Escape([string]$pathSeparator) | Where-Object {
                     $candidate = $_.TrimEnd('\', '/')
@@ -470,15 +608,15 @@ function Disable-UvCachePerVolume {
             $env:PATH = $pathEntries -join $pathSeparator
         }
 
-        if ($script:UvCachePerVolumeState.OriginalToolDirectoryWasSet) {
-            $env:UV_TOOL_DIR = $script:UvCachePerVolumeState.OriginalToolDirectory
+        if ($state.OriginalToolDirectoryWasSet) {
+            $env:UV_TOOL_DIR = $state.OriginalToolDirectory
         }
         else {
             Remove-Item Env:UV_TOOL_DIR -ErrorAction SilentlyContinue
         }
 
-        if ($script:UvCachePerVolumeState.OriginalToolBinDirectoryWasSet) {
-            $env:UV_TOOL_BIN_DIR = $script:UvCachePerVolumeState.OriginalToolBinDirectory
+        if ($state.OriginalToolBinDirectoryWasSet) {
+            $env:UV_TOOL_BIN_DIR = $state.OriginalToolBinDirectory
         }
         else {
             Remove-Item Env:UV_TOOL_BIN_DIR -ErrorAction SilentlyContinue
