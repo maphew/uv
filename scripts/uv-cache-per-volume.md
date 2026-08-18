@@ -8,7 +8,7 @@ normal cache on its original volume.
 The hook selects the cache as follows:
 
 1. On the volume containing uv's built-in cache, keep using the built-in cache.
-2. On another fixed local volume, use `.uv\cache` at that volume's root.
+2. On another fixed local volume, use `.local\uv\cache` at that volume's root.
 3. On mapped drives, UNC shares, removable drives, and non-filesystem PowerShell providers, use the
    built-in cache instead of creating a cache there.
 
@@ -17,7 +17,7 @@ For example, if uv's normal cache is `C:\Users\me\AppData\Local\uv\cache`:
 | Current directory | Selected cache |
 | --- | --- |
 | `C:\work\project` | `C:\Users\me\AppData\Local\uv\cache` |
-| `D:\work\project` | `D:\.uv\cache` |
+| `D:\work\project` | `D:\.local\uv\cache` |
 | `Z:\work\project`, where `Z:` is mapped | `C:\Users\me\AppData\Local\uv\cache` |
 | `\\server\share\project` | `C:\Users\me\AppData\Local\uv\cache` |
 
@@ -34,10 +34,20 @@ Enable-UvCachePerVolume
 The hook wraps the PowerShell `prompt` function. Interactive location changes therefore update
 `UV_CACHE_DIR` before the next command is entered. Child processes inherit the selected value.
 
+An existing process-level `UV_CACHE_DIR` does not need to be unset. The hook saves it, overrides it
+while enabled, and restores it when disabled. Other `UV_*` variables are not changed. If an older
+persistent `UV_CACHE_DIR` setting is no longer wanted in shells that do not load this hook, remove it
+from the user environment before enabling the hook:
+
+```powershell
+[Environment]::SetEnvironmentVariable("UV_CACHE_DIR", $null, "User")
+Remove-Item Env:UV_CACHE_DIR -ErrorAction SilentlyContinue
+```
+
 To use another path on secondary volumes:
 
 ```powershell
-Enable-UvCachePerVolume -CacheRelativePath ".local\uv\cache"
+Enable-UvCachePerVolume -CacheRelativePath ".cache\uv"
 ```
 
 To override the fallback cache explicitly:
@@ -48,7 +58,7 @@ Enable-UvCachePerVolume `
 ```
 
 With this configuration, `D:` uses `D:\Caches\uv`, other fixed local volumes use their
-volume-local `.uv\cache`, and mapped drives or UNC shares fall back to `D:\Caches\uv`.
+volume-local `.local\uv\cache`, and mapped drives or UNC shares fall back to `D:\Caches\uv`.
 
 For a persistent profile configuration with a per-user path on secondary volumes:
 
@@ -57,7 +67,7 @@ For a persistent profile configuration with a per-user path on secondary volumes
 
 $uvCacheOptions = @{
     DefaultCacheDirectory = "D:\Caches\uv"
-    CacheRelativePath     = ".uv\cache\$env:USERNAME"
+    CacheRelativePath     = ".local\uv\cache\$env:USERNAME"
 }
 
 Enable-UvCachePerVolume @uvCacheOptions
@@ -84,8 +94,8 @@ Disable-UvCachePerVolume
 - The script intentionally excludes removable and RAM disks as well as network locations. This can
   be made configurable after the safety of those cases is understood.
 - The volume root must permit creation of the configured relative cache path.
-- `.uv\cache` is shared by users who select the same volume. On a multi-user machine, configure a
-  per-user path such as `.uv\cache\$env:USERNAME` and ensure its access controls are appropriate.
+- `.local\uv\cache` is shared by users who select the same volume. On a multi-user machine, configure a
+  per-user path such as `.local\uv\cache\$env:USERNAME` and ensure its access controls are appropriate.
 - The process-level `UV_CACHE_DIR` selected by the hook takes precedence over `cache-dir` values in
   uv configuration files.
 - Separate volume caches can contain duplicate packages and initially require separate downloads.

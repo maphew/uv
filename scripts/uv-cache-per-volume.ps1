@@ -83,7 +83,7 @@ function Get-UvCacheDirectoryForPath {
         [Parameter(Mandatory)]
         [string]$DefaultCacheDirectory,
 
-        [string]$CacheRelativePath = ".uv\cache",
+        [string]$CacheRelativePath = ".local\uv\cache",
 
         [Parameter(DontShow)]
         [scriptblock]$VolumeResolver = {
@@ -183,7 +183,7 @@ function Enable-UvCachePerVolume {
     [CmdletBinding()]
     param(
         [string]$DefaultCacheDirectory,
-        [string]$CacheRelativePath = ".uv\cache"
+        [string]$CacheRelativePath = ".local\uv\cache"
     )
 
     if ($null -ne $script:UvCachePerVolumeState -and $script:UvCachePerVolumeState.Enabled) {

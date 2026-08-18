@@ -51,12 +51,12 @@ $cases = @(
     @{
         Name     = "secondary fixed volume"
         Path     = "D:\projects\example"
-        Expected = "D:\.uv\cache"
+        Expected = "D:\.local\uv\cache"
     },
     @{
         Name     = "fixed mounted volume"
         Path     = "C:\mount\data\example"
-        Expected = "C:\mount\data\.uv\cache"
+        Expected = "C:\mount\data\.local\uv\cache"
     },
     @{
         Name     = "mapped network drive"
